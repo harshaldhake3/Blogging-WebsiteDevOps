@@ -1,0 +1,192 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk17'               // Configure in Jenkins > Global Tool Configuration
+        maven 'maven3'            // Configure in Jenkins > Global Tool Configuration
+    }
+    
+    environment {
+        // SonarScanner tool (Configure in Jenkins > Global Tool Configuration as 'sonar-scanner')
+        SCANNER_HOME = tool 'sonar-scanner'
+
+        // ---- Customize these for your environment ----
+        GIT_BRANCH = 'main'                                           // Branch to build
+        GIT_URL    = 'https://your.git.server/devops/devops-blog.git' // Your devops-blog repo URL
+
+        REGISTRY            = 'docker.io'                   // or ghcr.io, registry.example.com
+        REGISTRY_NAMESPACE  = 'your-docker-namespace'       // Docker Hub username / org
+        IMAGE_NAME          = 'devops-blog'                 // Image name
+        DOCKER_CREDS_ID     = 'docker-login'                // Jenkins creds (username/password)
+
+        SONAR_INSTANCE      = 'sonar-server'                // Jenkins 'SonarQube servers' name
+        SONAR_PROJECT_KEY   = 'DevOpsBlog'
+        SONAR_PROJECT_NAME  = 'DevOpsBlog'
+
+        // Maven publisher to Nexus/Artifactory (configure under Jenkins > Managed files)
+        MAVEN_SETTINGS_ID   = 'devops-blog-maven-settings'  // Settings with <servers> creds for your repo
+
+        // Kubernetes access (withKubeConfig plugin)
+        K8S_CREDENTIALS_ID  = 'kubeconfig-devops'           // ServiceAccount / kubeconfig cred ID
+        K8S_CLUSTER_URL     = 'https://your.k8s.api:6443'   // API server URL
+        K8S_NAMESPACE       = 'devops-blog'                 // Target namespace
+
+        // Derived at runtime
+        IMAGE_TAG = ''                                      // Will be set from Maven version + build
+        IMAGE_REF = ''                                      // Fully qualified image ref
+    }
+
+    stages {
+
+        stage('Git Checkout') {
+            steps {
+                git branch: "${env.GIT_BRANCH}", url: "${env.GIT_URL}"
+                sh 'git log -1 --pretty=oneline'
+            }
+        }
+
+        stage('Gitleaks Scan') {
+            steps {
+                // Do not fail the whole build if secrets found; mark stage failed and continue
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh 'gitleaks detect --source . --report-path gitleaks-report.json --exit-code 1'
+                }
+            }
+        }
+
+        stage('MVN Compile') {
+            steps {
+                sh 'mvn -B -ntp clean compile'
+            }
+        }
+
+        stage('MVN Test') {
+            steps {
+                // Run tests (set -DskipTests=true if you need to skip)
+                sh 'mvn -B -ntp test'
+            }
+        }
+
+        stage('Trivy Filesystem Scan') {
+            steps {
+                // SCA/osv scan of working directory; produces HTML report
+                sh 'trivy fs --format table -o trivy-fs-report.html . || true'
+            }
+        }
+
+        stage('Sonarqube Analysis') {
+            steps {
+                withSonarQubeEnv("${env.SONAR_INSTANCE}") {
+                    sh '''
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                          -Dsonar.projectKey='''' + "${SONAR_PROJECT_KEY}" + '''' \
+                          -Dsonar.projectName='''' + "${SONAR_PROJECT_NAME}" + '''' \
+                          -Dsonar.sources=src/main/java \
+                          -Dsonar.java.binaries=target/classes
+                    '''
+                }
+            }
+        }
+
+        stage('MVN Build') {
+            steps {
+                sh 'mvn -B -ntp package -DskipTests'
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                    archiveArtifacts artifacts: 'target/*.jar, trivy-fs-report.html, gitleaks-report.json', fingerprint: true
+                }
+            }
+        }
+
+        stage('Publish Artifact Nexus') {
+            steps {
+                // Publishes to the repo configured in your settings.xml (servers/serverId creds)
+                withMaven(
+                    globalMavenSettingsConfig: "${env.MAVEN_SETTINGS_ID}",
+                    jdk: 'jdk17',
+                    maven: 'maven3',
+                    traceability: true
+                ) {
+                    sh 'mvn -B -ntp deploy -DskipTests'
+                }
+            }
+        }
+
+        stage('Docker Build & Tag') {
+            steps {
+                script {
+                    // Resolve version from pom.xml (stable in CI)
+                    def ver = sh(script: "mvn -q -Dexec.executable=echo -Dexec.args='\\${project.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec", returnStdout: true).trim()
+                    def sha = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    env.IMAGE_TAG = "${ver}-${env.BUILD_NUMBER}-${sha}"
+                    env.IMAGE_REF = "${env.REGISTRY}/${env.REGISTRY_NAMESPACE}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+
+                    echo "Building image ${env.IMAGE_REF}"
+                    sh "docker build -t ${env.IMAGE_REF} ."
+
+                    // Also tag 'latest' for convenience (optional)
+                    sh "docker tag ${env.IMAGE_REF} ${env.REGISTRY}/${env.REGISTRY_NAMESPACE}/${env.IMAGE_NAME}:latest"
+                }
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: "${env.DOCKER_CREDS_ID}", toolName: 'docker') {
+                        sh "docker push ${env.IMAGE_REF}"
+                        sh "docker push ${env.REGISTRY}/${env.REGISTRY_NAMESPACE}/${env.IMAGE_NAME}:latest"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                withKubeConfig(
+                    caCertificate: '',
+                    clusterName: 'kubernetes',
+                    contextName: '',
+                    credentialsId: "${env.K8S_CREDENTIALS_ID}",
+                    namespace: "${env.K8S_NAMESPACE}",
+                    restrictKubeConfigAccess: false,
+                    serverUrl: "${env.K8S_CLUSTER_URL}"
+                ) {
+                    // Apply base manifests (idempotent)
+                    sh '''
+                        kubectl apply -f k8s/00-namespace.yaml
+                        kubectl apply -f k8s/01-configmap.yaml
+                        kubectl apply -f k8s/02-secret.yaml
+                        kubectl apply -f k8s/03-pvc.yaml
+                        kubectl apply -f k8s/10-postgres.yaml
+                        kubectl apply -f k8s/20-app.yaml
+                        kubectl apply -f k8s/30-ingress.yaml || true
+                    '''
+                    // Inject the new image into the deployment and roll out
+                    sh '''
+                        kubectl -n ''' + "${K8S_NAMESPACE}" + ''' set image deployment/devops-blog devops-blog=''' + "${IMAGE_REF}" + ''' --record
+                        kubectl -n ''' + "${K8S_NAMESPACE}" + ''' rollout status deployment/devops-blog --timeout=180s
+                    '''
+                }
+            }
+        }
+
+        stage('Status to Kubernetes') {
+            steps {
+                withKubeConfig(
+                    caCertificate: '',
+                    clusterName: 'kubernetes',
+                    contextName: '',
+                    credentialsId: "${env.K8S_CREDENTIALS_ID}",
+                    namespace: "${env.K8S_NAMESPACE}",
+                    restrictKubeConfigAccess: false,
+                    serverUrl: "${env.K8S_CLUSTER_URL}"
+                ) {
+                    sh "kubectl get deploy,po,svc,ing -n ${env.K8S_NAMESPACE} -o wide"
+                }
+            }
+        }
+    }
+}
