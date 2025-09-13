@@ -1,0 +1,12 @@
+<th:block th:replace="layout :: body">
+  <article>
+    <h1 th:text="${post.title}">Title</h1>
+    <p class="text-muted">By <span th:text="${post.author.username}">author</span></p>
+    <div th:utext="${#strings.replace(post.content, '\n', '<br/>')}">Content</div>
+    <hr/>
+    <h5 th:if="${post.attachments.size() > 0}">Attachments</h5>
+    <ul>
+      <li th:each="a : ${post.attachments}" th:text="${a.filename}"></li>
+    </ul>
+  </article>
+</th:block>

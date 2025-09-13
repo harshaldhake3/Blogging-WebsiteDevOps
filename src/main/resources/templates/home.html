@@ -1,0 +1,17 @@
+<th:block th:replace="layout :: body">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="display-6">Latest Posts</h1>
+    <a th:if="${#authorization.expression('isAuthenticated()')}" class="btn btn-primary" href="/posts/new">Write Post</a>
+  </div>
+  <div class="row g-3">
+    <div class="col-12 col-md-6" th:each="p : ${posts}">
+      <div class="card h-100 shadow-sm">
+        <div class="card-body">
+          <h5 class="card-title" th:text="${p.title}">Title</h5>
+          <p class="card-text" th:text="${#strings.abbreviate(p.content, 200)}">Excerpt...</p>
+          <a class="btn btn-outline-primary btn-sm" th:href="@{'/posts/' + ${p.id}}">Read</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</th:block>

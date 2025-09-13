@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blog-config
+  namespace: devops-blog
+data:
+  SPRING_PROFILES_ACTIVE: "prod"

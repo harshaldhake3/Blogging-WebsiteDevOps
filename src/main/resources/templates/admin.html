@@ -1,0 +1,16 @@
+<th:block th:replace="layout :: body">
+  <h2>Admin Dashboard</h2>
+  <p>Manage users and view platform status.</p>
+  <table class="table table-striped">
+    <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Enabled</th><th>Roles</th></tr></thead>
+    <tbody>
+      <tr th:each="u : ${users}">
+        <td th:text="${u.id}">1</td>
+        <td th:text="${u.username}">user</td>
+        <td th:text="${u.email}">email</td>
+        <td th:text="${u.enabled}">true</td>
+        <td th:text="${u.roles}">[USER]</td>
+      </tr>
+    </tbody>
+  </table>
+</th:block>

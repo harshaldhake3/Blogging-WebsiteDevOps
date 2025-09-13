@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-blog
+  namespace: devops-blog
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: devops-blog } }
+  template:
+    metadata: { labels: { app: devops-blog } }
+    spec:
+      containers:
+        - name: app
+          image: devops-blog:v1.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              valueFrom:
+                configMapKeyRef:
+                  name: blog-config
+                  key: SPRING_PROFILES_ACTIVE
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: uploads
+              mountPath: /data/uploads
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devops-blog
+  namespace: devops-blog
+spec:
+  selector: { app: devops-blog }
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
